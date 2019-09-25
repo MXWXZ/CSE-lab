@@ -1,4 +1,5 @@
 #include "inode_manager.h"
+#include <ctime>
 
 // disk layer -----------------------------------------
 
@@ -71,6 +72,10 @@ uint32_t inode_manager::alloc_inode(uint32_t type) {
     inode* ino = (inode*)malloc(sizeof(inode));
     memset(ino, 0, sizeof(inode));
     ino->type = type;
+    int tm = std::time(0);
+    ino->mtime = tm;
+    ino->ctime = tm;
+    ino->atime = tm;
     put_inode(id, ino);
     using_inodes[id] = 1;
     free(ino);
@@ -108,6 +113,8 @@ struct inode* inode_manager::get_inode(uint32_t inum) {
         printf("\tim: inode not exist\n");
         return NULL;
     }
+    ino_disk->atime = std::time(0);
+    bm->write_block(IBLOCK(inum, bm->sb.nblocks), buf);
 
     ino = (struct inode*)malloc(sizeof(struct inode));
     *ino = *ino_disk;
@@ -126,6 +133,9 @@ void inode_manager::put_inode(uint32_t inum, struct inode* ino) {
     bm->read_block(IBLOCK(inum, bm->sb.nblocks), buf);
     ino_disk = (struct inode*)buf + inum % IPB;
     *ino_disk = *ino;
+    int tm = std::time(0);
+    ino_disk->mtime = tm;
+    ino_disk->ctime = tm;
     bm->write_block(IBLOCK(inum, bm->sb.nblocks), buf);
 }
 

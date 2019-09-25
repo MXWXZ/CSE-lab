@@ -33,16 +33,20 @@ public:
 private:
     static std::string filename(inum);
     static inum n2i(std::string);
-    static void buildmap(const char*, std::list<dirent>&);
+    static void buildlist(const char*, std::list<dirent>&);
+    static int nextmap(const char*, dirent&);
     static void addmap(std::string&, const char*, inum);
+    static void deletemap(std::string&, const char*);
     int createhelper(inum, const char*, mode_t, inum&, uint32_t);
 
 public:
     yfs_client();
     yfs_client(std::string, std::string);
 
+    int checktype(inum);
     bool isfile(inum);
     bool isdir(inum);
+    bool issymlink(inum);
 
     int getfile(inum, fileinfo&);
     int getdir(inum, dirinfo&);
@@ -57,6 +61,8 @@ public:
     int mkdir(inum, const char*, mode_t, inum&);
 
     /** you may need to add symbolic link related methods here.*/
+    int symlink(inum, const char*, const char*, inum&);
+    int readlink(inum, std::string&);
 };
 
 #endif

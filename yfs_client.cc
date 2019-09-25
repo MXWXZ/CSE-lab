@@ -30,28 +30,34 @@ std::string yfs_client::filename(inum inum) {
     return ost.str();
 }
 
-void yfs_client::buildmap(const char* buf, std::list<dirent>& list) {
-    while (true) {
-        int i = 0;
-        char tmpstr[256];
-        yfs_client::inum tmpnum;
-        while (*buf != '\0') {
-            tmpstr[i++] = *buf;
-            ++buf;
-        }
-        tmpstr[i] = '\0';
-        ++buf;
-        if (!i)
-            break;
-
-        tmpnum = *((uint32_t*)buf);
-        buf += 4;
-
-        dirent tmp;
-        tmp.name = tmpstr;
-        tmp.inum = tmpnum;
-        list.push_back(tmp);
+void yfs_client::buildlist(const char* buf, std::list<dirent>& list) {
+    dirent dir;
+    int size;
+    while ((size = nextmap(buf, dir)) != 0) {
+        list.push_back(dir);
+        buf += size;
     }
+}
+
+int yfs_client::nextmap(const char* buf, dirent& dir) {
+    std::string name;
+    yfs_client::inum inum;
+    const char* now = buf;
+
+    while (*now != '\0') {
+        name.push_back(*now);
+        ++now;
+    }
+    ++now;
+    if (name.empty())
+        return 0;
+
+    inum = *((uint32_t*)now);
+    now += 4;
+
+    dir.name = name;
+    dir.inum = inum;
+    return now - buf;
 }
 
 void yfs_client::addmap(std::string& buf, const char* name, inum node) {
@@ -61,30 +67,39 @@ void yfs_client::addmap(std::string& buf, const char* name, inum node) {
     buf.append((const char*)&tmp, 4);
 }
 
-bool yfs_client::isfile(inum inum) {
+void yfs_client::deletemap(std::string& buf, const char* name) {
+    dirent tmp;
+    const char* now = buf.c_str();
+    int size;
+    while ((size = nextmap(now, tmp)) != 0) {
+        if (tmp.name == name) {
+            buf.erase(now - buf.c_str(), size);
+            break;
+        }
+        now += size;
+    }
+}
+
+int yfs_client::checktype(inum inum) {
     extent_protocol::attr a;
 
     if (ec->getattr(inum, a) != extent_protocol::OK) {
         printf("error getting attr\n");
-        return false;
+        return 0;
     }
-
-    if (a.type == extent_protocol::T_FILE) {
-        printf("isfile: %lld is a file\n", inum);
-        return true;
-    }
-    printf("isfile: %lld is a dir\n", inum);
-    return false;
+    return a.type;
 }
-/** Your code here for Lab...
- * You may need to add routines such as
- * readlink, issymlink here to implement symbolic link.
- *
- * */
+
+bool yfs_client::isfile(inum inum) {
+    return checktype(inum) == extent_protocol::T_FILE;
+}
 
 bool yfs_client::isdir(inum inum) {
-    // Oops! is this still correct when you implement symlink?
-    return !isfile(inum);
+    return checktype(inum) == extent_protocol::T_DIR;
+}
+
+bool yfs_client::issymlink(inum inum) {
+    return checktype(inum) == extent_protocol::T_SYMLINK;
 }
 
 int yfs_client::getfile(inum inum, fileinfo& fin) {
@@ -224,7 +239,7 @@ int yfs_client::readdir(inum dir, std::list<dirent>& list) {
     if ((r = ec->get(dir, buf)) != extent_protocol::OK)
         return r;
 
-    buildmap(buf.c_str(), list);
+    buildlist(buf.c_str(), list);
 
     return r;
 }
@@ -245,11 +260,6 @@ int yfs_client::write(inum ino, size_t size, off_t off, const char* data,
                       size_t& bytes_written) {
     int r = OK;
 
-    /*
-     * your code goes here.
-     * note: write using ec->put().
-     * when off > length of original file, fill the holes with '\0'.
-     */
     bytes_written = size;
     std::string buf;
     if ((r = ec->get(ino, buf)) != extent_protocol::OK)
@@ -258,7 +268,7 @@ int yfs_client::write(inum ino, size_t size, off_t off, const char* data,
         buf.append(off - buf.size(), 0);
         bytes_written += off - buf.size();
     }
-    buf.replace(off, size, data, 0, size);
+    buf.replace(buf.begin() + off, buf.begin() + off + size, data, data + size);
     if ((r = ec->put(ino, buf)) != extent_protocol::OK)
         return r;
     return r;
@@ -267,11 +277,45 @@ int yfs_client::write(inum ino, size_t size, off_t off, const char* data,
 int yfs_client::unlink(inum parent, const char* name) {
     int r = OK;
 
-    /*
-     * your code goes here.
-     * note: you should remove the file using ec->remove,
-     * and update the parent directory content.
-     */
+    inum ino;
+    bool found = true;
+    if ((r = lookup(parent, name, found, ino)) != OK)
+        return r;
+    if (!found)
+        return NOENT;
+
+    ec->remove(ino);
+
+    std::string buf;
+    if ((r = ec->get(parent, buf)) != extent_protocol::OK)
+        return r;
+    deletemap(buf, name);
+    if ((r = ec->put(parent, buf)) != extent_protocol::OK)
+        return r;
+
+    return r;
+}
+
+int yfs_client::symlink(inum parent, const char* link, const char* name,
+                        inum& ino_out) {
+    int r = OK;
+
+    if ((r = createhelper(parent, name, 777, ino_out,
+                          extent_protocol::T_SYMLINK)) != OK)
+        return r;
+
+    size_t tmp;
+    if ((r = write(ino_out, strlen(link), 0, link, tmp)) != OK)
+        return r;
+
+    return r;
+}
+
+int yfs_client::readlink(inum ino, std::string& buf) {
+    int r = OK;
+
+    if ((r = read(ino, 4096, 0, buf)) != OK)
+        return r;
 
     return r;
 }
