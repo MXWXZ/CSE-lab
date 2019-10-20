@@ -150,16 +150,17 @@ release:
 // Only support set size of attr
 int yfs_client::setattr(inum ino, size_t size) {
     int r = OK;
+    lc->acquire(ino);
 
     extent_protocol::attr attr;
-    if ((r = ec->getattr(ino, attr)) != extent_protocol::OK)
-        return r;
-    if (attr.size == size)
-        return r;
-
     std::string buf;
+    if ((r = ec->getattr(ino, attr)) != extent_protocol::OK)
+        goto RET;
+    if (attr.size == size)
+        goto RET;
+
     if ((r = ec->get(ino, buf)) != extent_protocol::OK)
-        return r;
+        goto RET;
 
     if (attr.size > size)
         buf.erase(buf.begin() + size, buf.end());
@@ -167,6 +168,8 @@ int yfs_client::setattr(inum ino, size_t size) {
         buf.append(size - attr.size, 0);
     ec->put(ino, buf);
 
+RET:
+    lc->release(ino);
     return r;
 }
 
@@ -178,22 +181,27 @@ directory format
 int yfs_client::createhelper(inum parent, const char* name, mode_t mode,
                              inum& ino_out, uint32_t type) {
     int r = OK;
+    lc->acquire(parent);
 
     bool found = true;
+    std::string buf;
     if ((r = lookup(parent, name, found, ino_out)) != OK)
-        return r;
-    if (found)
-        return EXIST;
+        goto RET;
+    if (found) {
+        r = EXIST;
+        goto RET;
+    }
 
     ec->create(type, ino_out);
 
-    std::string buf;
     if ((r = ec->get(parent, buf)) != extent_protocol::OK)
-        return r;
+        goto RET;
     addmap(buf, name, ino_out);
     if ((r = ec->put(parent, buf)) != extent_protocol::OK)
-        return r;
+        goto RET;
 
+RET:
+    lc->release(parent);
     return r;
 }
 
@@ -258,40 +266,49 @@ int yfs_client::read(inum ino, size_t size, off_t off, std::string& data) {
 int yfs_client::write(inum ino, size_t size, off_t off, const char* data,
                       size_t& bytes_written) {
     int r = OK;
+    lc->acquire(ino);
 
     bytes_written = size;
     std::string buf;
     if ((r = ec->get(ino, buf)) != extent_protocol::OK)
-        return r;
+        goto RET;
     if (off > (off_t)buf.size()) {
         buf.append(off - buf.size(), 0);
         bytes_written += off - buf.size();
     }
     buf.replace(buf.begin() + off, buf.begin() + off + size, data, data + size);
     if ((r = ec->put(ino, buf)) != extent_protocol::OK)
-        return r;
+        goto RET;
+
+RET:
+    lc->release(ino);
     return r;
 }
 
 int yfs_client::unlink(inum parent, const char* name) {
     int r = OK;
+    lc->acquire(parent);
 
     inum ino;
     bool found = true;
+    std::string buf;
     if ((r = lookup(parent, name, found, ino)) != OK)
-        return r;
-    if (!found)
-        return NOENT;
+        goto RET;
+    if (!found) {
+        r = NOENT;
+        goto RET;
+    }
 
     ec->remove(ino);
 
-    std::string buf;
     if ((r = ec->get(parent, buf)) != extent_protocol::OK)
-        return r;
+        goto RET;
     deletemap(buf, name);
     if ((r = ec->put(parent, buf)) != extent_protocol::OK)
-        return r;
+        goto RET;
 
+RET:
+    lc->release(parent);
     return r;
 }
 
