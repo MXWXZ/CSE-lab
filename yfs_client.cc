@@ -194,7 +194,7 @@ directory format
 int yfs_client::createhelper(inum parent, const char* name, mode_t mode,
                              inum& ino_out, uint32_t type) {
     int r = OK;
-    lc->acquire(parent);
+    lc->acquire(0);  // prevent reuse of id
 
     bool found = true;
     std::string buf;
@@ -205,9 +205,7 @@ int yfs_client::createhelper(inum parent, const char* name, mode_t mode,
         goto RET;
     }
 
-    lc->acquire(0);  // prevent reuse of id
     ec->create(type, ino_out);
-    lc->release(0);
 
     if ((r = ec->get(parent, buf)) != extent_protocol::OK)
         goto RET;
@@ -219,7 +217,7 @@ int yfs_client::createhelper(inum parent, const char* name, mode_t mode,
         goto RET;
 
 RET:
-    lc->release(parent);
+    lc->release(0);
     return r;
 }
 
@@ -334,9 +332,7 @@ int yfs_client::unlink(inum parent, const char* name) {
         goto RET;
     }
 
-    lc->acquire(ino);
     ec->remove(ino);
-    lc->release(ino);
 
     if ((r = ec->get(parent, buf)) != extent_protocol::OK)
         goto RET;

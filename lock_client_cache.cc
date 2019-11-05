@@ -61,7 +61,6 @@ END:
 
 lock_protocol::status lock_client_cache::release(lock_protocol::lockid_t lid) {
     lock_protocol::status ret = lock_protocol::OK;
-    pthread_mutex_lock(&mutex);
     // fprintf(stderr, "%s => %X: release %d status %d\n", id.c_str(),
     //         pthread_self(), lid, lock[lid].revoked);
 
