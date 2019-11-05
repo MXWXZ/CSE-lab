@@ -81,8 +81,10 @@ lock_protocol::status lock_client_cache::release(lock_protocol::lockid_t lid) {
     return ret;
 }
 
+#include <unistd.h>
 rlock_protocol::status lock_client_cache::revoke_handler(
     lock_protocol::lockid_t lid, int&) {
+    usleep(100000);  // for least lock...
     pthread_mutex_lock(&mutex);
     // fprintf(stderr, "%s => %X: revoke %d, status %d\n", id.c_str(),
     //         pthread_self(), lid, lock[lid].lock_status);
