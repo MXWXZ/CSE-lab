@@ -40,9 +40,11 @@ private:
     static inum n2i(std::string);
     static void buildlist(const char*, std::list<dirent>&);
     static int nextmap(const char*, dirent&);
-    static void addmap(std::string&, const char*, inum);
+    static bool addmap(std::string&, const char*, inum);
     static void deletemap(std::string&, const char*);
     int createhelper(inum, const char*, mode_t, inum&, uint32_t);
+    int lookup_nl(inum, const char*, bool&, inum&);
+    int readdir_nl(inum, std::list<dirent>&);
 
 public:
     yfs_client(std::string, std::string);

@@ -59,11 +59,15 @@ int yfs_client::nextmap(const char* buf, dirent& dir) {
     return now - buf;
 }
 
-void yfs_client::addmap(std::string& buf, const char* name, inum node) {
+bool yfs_client::addmap(std::string& buf, const char* name, inum node) {
+    if (buf.size() + strlen(name) + 5 >=
+        (NDIRECT + NINDIRECT) * BLOCK_SIZE)  // last always 0
+        return false;
     uint32_t tmp = node;
     buf.append(name);
     buf.append(1, 0);
     buf.append((const char*)&tmp, 4);
+    return true;
 }
 
 void yfs_client::deletemap(std::string& buf, const char* name) {
@@ -81,12 +85,17 @@ void yfs_client::deletemap(std::string& buf, const char* name) {
 
 int yfs_client::checktype(inum inum) {
     extent_protocol::attr a;
+    int ret = 0;
+    lc->acquire(inum);
 
     if (ec->getattr(inum, a) != extent_protocol::OK) {
         printf("error getting attr\n");
-        return 0;
+        goto RET;
     }
-    return a.type;
+    ret = a.type;
+RET:
+    lc->release(inum);
+    return ret;
 }
 
 bool yfs_client::isfile(inum inum) {
@@ -103,12 +112,13 @@ bool yfs_client::issymlink(inum inum) {
 
 int yfs_client::getfile(inum inum, fileinfo& fin) {
     int r = OK;
+    lc->acquire(inum);
 
     printf("getfile %016llx\n", inum);
     extent_protocol::attr a;
     if (ec->getattr(inum, a) != extent_protocol::OK) {
         r = IOERR;
-        goto release;
+        goto RET;
     }
 
     fin.atime = a.atime;
@@ -117,24 +127,27 @@ int yfs_client::getfile(inum inum, fileinfo& fin) {
     fin.size = a.size;
     printf("getfile %016llx -> sz %llu\n", inum, fin.size);
 
-release:
+RET:
+    lc->release(inum);
     return r;
 }
 
 int yfs_client::getdir(inum inum, dirinfo& din) {
     int r = OK;
+    lc->acquire(inum);
 
     printf("getdir %016llx\n", inum);
     extent_protocol::attr a;
     if (ec->getattr(inum, a) != extent_protocol::OK) {
         r = IOERR;
-        goto release;
+        goto RET;
     }
     din.atime = a.atime;
     din.mtime = a.mtime;
     din.ctime = a.ctime;
 
-release:
+RET:
+    lc->release(inum);
     return r;
 }
 
@@ -185,18 +198,23 @@ int yfs_client::createhelper(inum parent, const char* name, mode_t mode,
 
     bool found = true;
     std::string buf;
-    if ((r = lookup(parent, name, found, ino_out)) != OK)
+    if ((r = lookup_nl(parent, name, found, ino_out)) != OK)
         goto RET;
     if (found) {
         r = EXIST;
         goto RET;
     }
 
+    lc->acquire(0);  // prevent reuse of id
     ec->create(type, ino_out);
+    lc->release(0);
 
     if ((r = ec->get(parent, buf)) != extent_protocol::OK)
         goto RET;
-    addmap(buf, name, ino_out);
+    if (!addmap(buf, name, ino_out)) {
+        r = IOERR;
+        goto RET;
+    }
     if ((r = ec->put(parent, buf)) != extent_protocol::OK)
         goto RET;
 
@@ -215,21 +233,17 @@ int yfs_client::mkdir(inum parent, const char* name, mode_t mode,
     return createhelper(parent, name, mode, ino_out, extent_protocol::T_DIR);
 }
 
-int yfs_client::lookup(inum parent, const char* name, bool& found,
-                       inum& ino_out) {
+int yfs_client::lookup_nl(inum parent, const char* name, bool& found,
+                          inum& ino_out) {
     int r = OK;
 
-    std::string buf;
-    if ((r = ec->get(parent, buf)) != extent_protocol::OK)
-        return r;
-
     std::list<dirent> list;
-    readdir(parent, list);
+    readdir_nl(parent, list);
 
     found = false;
     for (std::list<dirent>::iterator it = list.begin(); it != list.end();
          ++it) {
-        if ((*it).name.compare(name) == 0) {
+        if ((*it).name == name) {
             found = true;
             ino_out = (*it).inum;
             break;
@@ -239,7 +253,7 @@ int yfs_client::lookup(inum parent, const char* name, bool& found,
     return r;
 }
 
-int yfs_client::readdir(inum dir, std::list<dirent>& list) {
+int yfs_client::readdir_nl(inum dir, std::list<dirent>& list) {
     int r = OK;
 
     std::string buf;
@@ -251,15 +265,36 @@ int yfs_client::readdir(inum dir, std::list<dirent>& list) {
     return r;
 }
 
+int yfs_client::lookup(inum parent, const char* name, bool& found,
+                       inum& ino_out) {
+    lc->acquire(parent);
+    int ret = lookup_nl(parent, name, found, ino_out);
+    lc->release(parent);
+    return ret;
+}
+
+int yfs_client::readdir(inum dir, std::list<dirent>& list) {
+    lc->acquire(dir);
+    int ret = readdir_nl(dir, list);
+    lc->release(dir);
+    return ret;
+}
+
 int yfs_client::read(inum ino, size_t size, off_t off, std::string& data) {
     int r = OK;
+    lc->acquire(ino);
 
     std::string buf;
     if ((r = ec->get(ino, buf)) != extent_protocol::OK)
-        return r;
-    if (off >= (off_t)buf.size())
-        return IOERR;
+        goto RET;
+    if (off >= (off_t)buf.size()) {
+        r = IOERR;
+        goto RET;
+    }
     data = buf.substr(off, size);
+
+RET:
+    lc->release(ino);
     return r;
 }
 
@@ -292,14 +327,16 @@ int yfs_client::unlink(inum parent, const char* name) {
     inum ino;
     bool found = true;
     std::string buf;
-    if ((r = lookup(parent, name, found, ino)) != OK)
+    if ((r = lookup_nl(parent, name, found, ino)) != extent_protocol::OK)
         goto RET;
     if (!found) {
         r = NOENT;
         goto RET;
     }
 
+    lc->acquire(ino);
     ec->remove(ino);
+    lc->release(ino);
 
     if ((r = ec->get(parent, buf)) != extent_protocol::OK)
         goto RET;
