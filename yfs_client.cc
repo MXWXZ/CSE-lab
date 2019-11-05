@@ -103,6 +103,7 @@ bool yfs_client::issymlink(inum inum) {
 
 int yfs_client::getfile(inum inum, fileinfo& fin) {
     int r = OK;
+    lc->acquire(inum);
 
     printf("getfile %016llx\n", inum);
     extent_protocol::attr a;
@@ -118,11 +119,13 @@ int yfs_client::getfile(inum inum, fileinfo& fin) {
     printf("getfile %016llx -> sz %llu\n", inum, fin.size);
 
 release:
+    lc->release(inum);
     return r;
 }
 
 int yfs_client::getdir(inum inum, dirinfo& din) {
     int r = OK;
+    lc->acquire(inum);
 
     printf("getdir %016llx\n", inum);
     extent_protocol::attr a;
@@ -135,6 +138,7 @@ int yfs_client::getdir(inum inum, dirinfo& din) {
     din.ctime = a.ctime;
 
 release:
+    lc->release(inum);
     return r;
 }
 
@@ -192,7 +196,9 @@ int yfs_client::createhelper(inum parent, const char* name, mode_t mode,
         goto RET;
     }
 
+    lc->acquire(0);
     ec->create(type, ino_out);
+    lc->release(0);
 
     if ((r = ec->get(parent, buf)) != extent_protocol::OK)
         goto RET;
@@ -219,10 +225,6 @@ int yfs_client::lookup(inum parent, const char* name, bool& found,
                        inum& ino_out) {
     int r = OK;
 
-    std::string buf;
-    if ((r = ec->get(parent, buf)) != extent_protocol::OK)
-        return r;
-
     std::list<dirent> list;
     readdir(parent, list);
 
@@ -247,19 +249,25 @@ int yfs_client::readdir(inum dir, std::list<dirent>& list) {
         return r;
 
     buildlist(buf.c_str(), list);
-
     return r;
 }
 
 int yfs_client::read(inum ino, size_t size, off_t off, std::string& data) {
     int r = OK;
+    lc->acquire(ino);
 
     std::string buf;
     if ((r = ec->get(ino, buf)) != extent_protocol::OK)
-        return r;
-    if (off >= (off_t)buf.size())
-        return IOERR;
+        goto RET;
+    if (off >= (off_t)buf.size()) {
+        r = IOERR;
+        goto RET;
+    }
+
     data = buf.substr(off, size);
+
+RET:
+    lc->release(ino);
     return r;
 }
 
