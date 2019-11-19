@@ -10,6 +10,8 @@
 #include "extent_client.h"
 #include <vector>
 
+class lock_client_cache;
+
 class yfs_client {
     extent_client* ec;
     lock_client_cache* lc;
@@ -45,6 +47,35 @@ private:
     int createhelper(inum, const char*, mode_t, inum&, uint32_t);
     int lookup_nl(inum, const char*, bool&, inum&);
     int readdir_nl(inum, std::list<dirent>&);
+
+private:
+    enum cache_type { CACHE_DATA, CACHE_ATTR };
+    struct cache_entry {
+        yfs_client::cache_type type;
+        extent_protocol::extentid_t eid;
+        extent_protocol::attr attr;
+        std::string data;
+        bool modified;
+    };
+
+    std::vector<cache_entry> cache;
+    std::vector<extent_protocol::extentid_t> deleted;
+    cache_entry* find_cache(extent_protocol::extentid_t eid, cache_type type);
+
+    extent_protocol::status ec_create(uint32_t type,
+                                      extent_protocol::extentid_t& eid);
+    extent_protocol::status ec_get(extent_protocol::extentid_t eid,
+                                   std::string& buf);
+    extent_protocol::status ec_getattr(extent_protocol::extentid_t eid,
+                                       extent_protocol::attr& a);
+    extent_protocol::status ec_put(extent_protocol::extentid_t eid,
+                                   std::string buf);
+    extent_protocol::status ec_remove(extent_protocol::extentid_t eid);
+
+public:
+    void clear_cache(extent_protocol::extentid_t eid);
+    std::vector<extent_protocol::extentid_t> flush_cache(
+        extent_protocol::extentid_t eid);
 
 public:
     yfs_client(std::string, std::string);

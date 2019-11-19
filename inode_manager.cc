@@ -25,12 +25,14 @@ void disk::write_block(blockid_t id, const char* buf) {
 blockid_t block_manager::alloc_block() {
     blockid_t data_start = sb.nblocks / BPB + INODE_NUM + 2;  // 1034
     static blockid_t id = data_start;
+    pthread_mutex_lock(&mutex);
     while (using_blocks[id]) {
         id = (id + 1) % sb.nblocks;
         if (id < data_start)
             id = data_start;
     }
     using_blocks[id] = 1;
+    pthread_mutex_unlock(&mutex);
 
     return id;
 }
@@ -47,7 +49,11 @@ block_manager::block_manager() {
     sb.size = BLOCK_SIZE * BLOCK_NUM;
     sb.nblocks = BLOCK_NUM;
     sb.ninodes = INODE_NUM;
+
+    pthread_mutex_init(&mutex, NULL);
 }
+
+block_manager::~block_manager() { pthread_mutex_destroy(&mutex); }
 
 void block_manager::read_block(uint32_t id, char* buf) {
     d->read_block(id, buf);
@@ -60,6 +66,7 @@ void block_manager::write_block(uint32_t id, const char* buf) {
 // inode layer -----------------------------------------
 
 inode_manager::inode_manager() {
+    pthread_mutex_init(&mutex, NULL);
     bm = new block_manager();
     uint32_t root_dir = alloc_inode(extent_protocol::T_DIR);
     if (root_dir != 1) {
@@ -68,12 +75,17 @@ inode_manager::inode_manager() {
     }
 }
 
+inode_manager::~inode_manager() { pthread_mutex_destroy(&mutex); }
+
 /* Create a new file.
  * Return its inum. */
 uint32_t inode_manager::alloc_inode(uint32_t type) {
     static uint32_t id = 1;
+    pthread_mutex_lock(&mutex);
     while (using_inodes[id])
         id = id % INODE_NUM + 1;
+    using_inodes[id] = 1;
+    pthread_mutex_unlock(&mutex);
 
     inode* ino = (inode*)malloc(sizeof(inode));
     memset(ino, 0, sizeof(inode));
@@ -83,7 +95,6 @@ uint32_t inode_manager::alloc_inode(uint32_t type) {
     ino->ctime = tm;
     ino->atime = tm;
     put_inode(id, ino);
-    using_inodes[id] = 1;
     free(ino);
     return id;
 }

@@ -36,9 +36,11 @@ class block_manager {
 private:
     disk* d;
     std::map<uint32_t, int> using_blocks;
+    pthread_mutex_t mutex;
 
 public:
     block_manager();
+    ~block_manager();
     struct superblock sb;
 
     uint32_t alloc_block();
@@ -86,8 +88,11 @@ private:
     void remove_iblock(uint32_t inum);
     void write_blockn(uint32_t id, const char* buf, int size);
 
+    pthread_mutex_t mutex;
+
 public:
     inode_manager();
+    ~inode_manager();
     uint32_t alloc_inode(uint32_t type);
     void free_inode(uint32_t inum);
     void read_file(uint32_t inum, char** buf, int* size);

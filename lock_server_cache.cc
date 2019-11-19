@@ -20,6 +20,7 @@ int lock_server_cache::acquire(lock_protocol::lockid_t lid, std::string id,
                                int&) {
     lock_protocol::status ret = lock_protocol::OK;
     pthread_mutex_lock(&mutex);
+    conn[id] = true;
     if (lock[lid].locked) {
         std::string revokeid = lock[lid].id;
         if (!lock[lid].waiting.empty())
@@ -88,5 +89,20 @@ lock_protocol::status lock_server_cache::stat(lock_protocol::lockid_t lid,
                                               int& r) {
     tprintf("stat request\n");
     r = nacquire;
+    return lock_protocol::OK;
+}
+
+int lock_server_cache::flush(std::string id, std::string str, int&) {
+    pthread_mutex_lock(&mutex);
+    for (std::map<std::string, bool>::iterator it = conn.begin();
+         it != conn.end(); ++it)
+        if (it->second && it->first != id) {
+            handle h(it->first);
+            rpcc* cl = h.safebind();
+            int r;
+            if (cl)
+                cl->call(rlock_protocol::flush, str, r);
+        }
+    pthread_mutex_unlock(&mutex);
     return lock_protocol::OK;
 }

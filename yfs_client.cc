@@ -8,11 +8,12 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <ctime>
 
 yfs_client::yfs_client(std::string extent_dst, std::string lock_dst) {
     ec = new extent_client(extent_dst);
-    lc = new lock_client_cache(lock_dst);
-    if (ec->put(1, "") != extent_protocol::OK)
+    lc = new lock_client_cache(lock_dst, this);
+    if (ec_put(1, "") != extent_protocol::OK)
         printf("error init root dir\n");  // XYB: init root dir
 }
 
@@ -88,7 +89,7 @@ int yfs_client::checktype(inum inum) {
     int ret = 0;
     lc->acquire(inum);
 
-    if (ec->getattr(inum, a) != extent_protocol::OK) {
+    if (ec_getattr(inum, a) != extent_protocol::OK) {
         printf("error getting attr\n");
         goto RET;
     }
@@ -116,7 +117,7 @@ int yfs_client::getfile(inum inum, fileinfo& fin) {
 
     printf("getfile %016llx\n", inum);
     extent_protocol::attr a;
-    if (ec->getattr(inum, a) != extent_protocol::OK) {
+    if (ec_getattr(inum, a) != extent_protocol::OK) {
         r = IOERR;
         goto RET;
     }
@@ -138,7 +139,7 @@ int yfs_client::getdir(inum inum, dirinfo& din) {
 
     printf("getdir %016llx\n", inum);
     extent_protocol::attr a;
-    if (ec->getattr(inum, a) != extent_protocol::OK) {
+    if (ec_getattr(inum, a) != extent_protocol::OK) {
         r = IOERR;
         goto RET;
     }
@@ -167,19 +168,19 @@ int yfs_client::setattr(inum ino, size_t size) {
 
     extent_protocol::attr attr;
     std::string buf;
-    if ((r = ec->getattr(ino, attr)) != extent_protocol::OK)
+    if ((r = ec_getattr(ino, attr)) != extent_protocol::OK)
         goto RET;
     if (attr.size == size)
         goto RET;
 
-    if ((r = ec->get(ino, buf)) != extent_protocol::OK)
+    if ((r = ec_get(ino, buf)) != extent_protocol::OK)
         goto RET;
 
     if (attr.size > size)
         buf.erase(buf.begin() + size, buf.end());
     else
         buf.append(size - attr.size, 0);
-    ec->put(ino, buf);
+    ec_put(ino, buf);
 
 RET:
     lc->release(ino);
@@ -194,7 +195,7 @@ directory format
 int yfs_client::createhelper(inum parent, const char* name, mode_t mode,
                              inum& ino_out, uint32_t type) {
     int r = OK;
-    lc->acquire(0);  // prevent reuse of id
+    lc->acquire(parent);
 
     bool found = true;
     std::string buf;
@@ -205,19 +206,21 @@ int yfs_client::createhelper(inum parent, const char* name, mode_t mode,
         goto RET;
     }
 
-    ec->create(type, ino_out);
+    ec_create(type, ino_out);
 
-    if ((r = ec->get(parent, buf)) != extent_protocol::OK)
+    if ((r = ec_get(parent, buf)) != extent_protocol::OK)
         goto RET;
+
     if (!addmap(buf, name, ino_out)) {
         r = IOERR;
         goto RET;
     }
-    if ((r = ec->put(parent, buf)) != extent_protocol::OK)
+
+    if ((r = ec_put(parent, buf)) != extent_protocol::OK)
         goto RET;
 
 RET:
-    lc->release(0);
+    lc->release(parent);
     return r;
 }
 
@@ -255,7 +258,7 @@ int yfs_client::readdir_nl(inum dir, std::list<dirent>& list) {
     int r = OK;
 
     std::string buf;
-    if ((r = ec->get(dir, buf)) != extent_protocol::OK)
+    if ((r = ec_get(dir, buf)) != extent_protocol::OK)
         return r;
 
     buildlist(buf.c_str(), list);
@@ -283,7 +286,7 @@ int yfs_client::read(inum ino, size_t size, off_t off, std::string& data) {
     lc->acquire(ino);
 
     std::string buf;
-    if ((r = ec->get(ino, buf)) != extent_protocol::OK)
+    if ((r = ec_get(ino, buf)) != extent_protocol::OK)
         goto RET;
     if (off >= (off_t)buf.size()) {
         r = IOERR;
@@ -303,14 +306,15 @@ int yfs_client::write(inum ino, size_t size, off_t off, const char* data,
 
     bytes_written = size;
     std::string buf;
-    if ((r = ec->get(ino, buf)) != extent_protocol::OK)
+    if ((r = ec_get(ino, buf)) != extent_protocol::OK)
         goto RET;
+
     if (off > (off_t)buf.size()) {
         buf.append(off - buf.size(), 0);
         bytes_written += off - buf.size();
     }
     buf.replace(buf.begin() + off, buf.begin() + off + size, data, data + size);
-    if ((r = ec->put(ino, buf)) != extent_protocol::OK)
+    if ((r = ec_put(ino, buf)) != extent_protocol::OK)
         goto RET;
 
 RET:
@@ -332,12 +336,14 @@ int yfs_client::unlink(inum parent, const char* name) {
         goto RET;
     }
 
-    ec->remove(ino);
+    lc->acquire(ino);
+    ec_remove(ino);
+    lc->release(ino);
 
-    if ((r = ec->get(parent, buf)) != extent_protocol::OK)
+    if ((r = ec_get(parent, buf)) != extent_protocol::OK)
         goto RET;
     deletemap(buf, name);
-    if ((r = ec->put(parent, buf)) != extent_protocol::OK)
+    if ((r = ec_put(parent, buf)) != extent_protocol::OK)
         goto RET;
 
 RET:
@@ -367,4 +373,135 @@ int yfs_client::readlink(inum ino, std::string& buf) {
         return r;
 
     return r;
+}
+
+yfs_client::cache_entry* yfs_client::find_cache(extent_protocol::extentid_t eid,
+                                                cache_type type) {
+    for (std::vector<cache_entry>::iterator it = cache.begin();
+         it != cache.end(); ++it)
+        if (it->eid == eid && it->type == type)
+            return &(*it);
+    return NULL;
+}
+
+extent_protocol::status yfs_client::ec_create(
+    uint32_t type, extent_protocol::extentid_t& eid) {
+    extent_protocol::status ret = ec->create(type, eid);
+    if (ret == extent_protocol::OK) {
+        extent_protocol::attr a;
+        cache_entry newentry;
+        a.type = type;
+        int tm = std::time(0);
+        a.mtime = tm;
+        a.ctime = tm;
+        a.atime = tm;
+        newentry.eid = eid;
+        newentry.type = CACHE_ATTR;
+        newentry.attr = a;
+        newentry.modified = false;
+        cache.push_back(newentry);
+
+        newentry.eid = eid;
+        newentry.type = CACHE_DATA;
+        newentry.data = "";
+        newentry.modified = false;
+        cache.push_back(newentry);
+    }
+    return ret;
+}
+
+extent_protocol::status yfs_client::ec_get(extent_protocol::extentid_t eid,
+                                           std::string& buf) {
+    cache_entry* entry = find_cache(eid, CACHE_DATA);
+    if (entry) {
+        buf = entry->data;
+        return extent_protocol::OK;
+    } else {
+        extent_protocol::status ret = ec->get(eid, buf);
+        if (ret == extent_protocol::OK) {
+            cache_entry newentry;
+            newentry.eid = eid;
+            newentry.type = CACHE_DATA;
+            newentry.data = buf;
+            newentry.modified = false;
+            cache.push_back(newentry);
+        }
+        return ret;
+    }
+}
+
+extent_protocol::status yfs_client::ec_getattr(extent_protocol::extentid_t eid,
+                                               extent_protocol::attr& a) {
+    cache_entry* entry = find_cache(eid, CACHE_ATTR);
+    if (entry) {
+        a = entry->attr;
+        return extent_protocol::OK;
+    } else {
+        extent_protocol::status ret = ec->getattr(eid, a);
+        if (ret == extent_protocol::OK) {
+            cache_entry newentry;
+            newentry.eid = eid;
+            newentry.type = CACHE_ATTR;
+            newentry.attr = a;
+            newentry.modified = false;
+            cache.push_back(newentry);
+        }
+        return ret;
+    }
+}
+
+extent_protocol::status yfs_client::ec_put(extent_protocol::extentid_t eid,
+                                           std::string buf) {
+    cache_entry* entry = find_cache(eid, CACHE_DATA);
+    if (entry) {
+        entry->data = buf;
+        entry->modified = true;
+    } else {
+        cache_entry newentry;
+        newentry.eid = eid;
+        newentry.type = CACHE_DATA;
+        newentry.data = buf;
+        newentry.modified = true;
+        cache.push_back(newentry);
+    }
+    entry = find_cache(eid, CACHE_ATTR);
+    if (entry) {
+        entry->attr.size = buf.size();
+        int tm = std::time(0);
+        entry->attr.mtime = tm;
+        entry->attr.ctime = tm;
+    }
+    return extent_protocol::OK;
+}
+
+extent_protocol::status yfs_client::ec_remove(extent_protocol::extentid_t eid) {
+    clear_cache(eid);
+    deleted.push_back(eid);
+    return ec->remove(eid);
+}
+
+void yfs_client::clear_cache(extent_protocol::extentid_t eid) {
+    std::vector<cache_entry>::iterator it = cache.begin();
+    while (it != cache.end())
+        if (it->eid == eid)
+            it = cache.erase(it);
+        else
+            ++it;
+}
+
+std::vector<extent_protocol::extentid_t> yfs_client::flush_cache(
+    extent_protocol::extentid_t eid) {
+    std::vector<extent_protocol::extentid_t> ret = deleted;
+    std::vector<cache_entry>::iterator it = cache.begin();
+    while (it != cache.end()) {
+        if (it->eid == eid && it->type == CACHE_DATA && it->modified) {
+            ec->put(eid, it->data);
+            ret.push_back(eid);
+            it = cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    deleted.clear();
+    return ret;
 }

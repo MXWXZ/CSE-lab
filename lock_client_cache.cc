@@ -10,9 +10,9 @@
 
 int lock_client_cache::last_port = 0;
 
-lock_client_cache::lock_client_cache(std::string xdst,
+lock_client_cache::lock_client_cache(std::string xdst, yfs_client* c,
                                      class lock_release_user* _lu)
-    : lock_client(xdst), lu(_lu) {
+    : lock_client(xdst), lu(_lu), client(c) {
     srand(time(NULL) ^ last_port);
     rlock_port = ((rand() % 32000) | (0x1 << 10));
     const char* hname;
@@ -26,6 +26,7 @@ lock_client_cache::lock_client_cache(std::string xdst,
     rlsrpc->reg(rlock_protocol::revoke, this,
                 &lock_client_cache::revoke_handler);
     rlsrpc->reg(rlock_protocol::retry, this, &lock_client_cache::retry_handler);
+    rlsrpc->reg(rlock_protocol::flush, this, &lock_client_cache::flush_handler);
     pthread_mutex_init(&mutex, NULL);
     pthread_cond_init(&cond, NULL);
 }
@@ -66,7 +67,19 @@ lock_protocol::status lock_client_cache::release(lock_protocol::lockid_t lid) {
 
     pthread_mutex_lock(&mutex);
     if (lock[lid].revoked) {
+        std::vector<extent_protocol::extentid_t> clr = client->flush_cache(lid);
+        std::string str;
+        char tmp[100];
+        for (std::vector<extent_protocol::extentid_t>::iterator it =
+                 clr.begin();
+             it != clr.end(); ++it) {
+            sprintf(tmp, "%d ", (int)*it);
+            str += tmp;
+        }
         int r;
+        if (!str.empty())
+            cl->call(lock_protocol::flush, id, str, r);
+
         lock[lid].lock_status = RELEASING;
         pthread_mutex_unlock(&mutex);
         ret = cl->call(lock_protocol::release, lid, id, r);
@@ -85,7 +98,7 @@ lock_protocol::status lock_client_cache::release(lock_protocol::lockid_t lid) {
 #include <unistd.h>
 rlock_protocol::status lock_client_cache::revoke_handler(
     lock_protocol::lockid_t lid, int&) {
-    usleep(100000);  // for least lock...
+    usleep(300000);  // for least lock...
     pthread_mutex_lock(&mutex);
     // fprintf(stderr, "%s => %X: revoke %d, status %d\n", id.c_str(),
     //         pthread_self(), lid, lock[lid].lock_status);
@@ -106,5 +119,17 @@ rlock_protocol::status lock_client_cache::retry_handler(
     lock[lid].lock_status = LOCKED;
     pthread_cond_signal(&cond);
     pthread_mutex_unlock(&mutex);
+    return rlock_protocol::OK;
+}
+
+rlock_protocol::status lock_client_cache::flush_handler(std::string str, int&) {
+    const char* now = str.c_str();
+    while (*now != '\0') {
+        int r = atoi(now);
+        client->clear_cache(r);
+        while (*now != ' ')
+            ++now;
+        ++now;
+    }
     return rlock_protocol::OK;
 }
